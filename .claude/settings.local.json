@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx eslint *)",
+      "Bash(npx tsc *)",
+      "mcp__claude-context__get_indexing_status",
+      "mcp__claude-context__search_code",
+      "Bash(git status *)",
+      "Bash(awk 'NR==680,NR==687{print}' public/js/controllers/account.ts)",
+      "Bash(node -e ' *)",
+      "Bash(git --no-pager diff --cached --stat)"
+    ]
+  },
+  "enabledMcpjsonServers": [
+    "claude-context"
+  ]
+}
