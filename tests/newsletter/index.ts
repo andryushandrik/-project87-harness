@@ -305,7 +305,7 @@ const seedBulk = async (account: Account): Promise<void> => {
 };
 
 /**
- * Data for the manual mass-send screen ("Рассылка и печать счетов"). Nothing is sent
+ * Data for the manual mass-send screen ("Рассылка документов"). Nothing is sent
  * here: the accounts only set up the outcomes a tester triggers from the UI — one big
  * enough to split into two batches of 30, one to mix two accounts in a selection, one
  * whose staff is invisible to the recipient filter so every letter is skipped.
