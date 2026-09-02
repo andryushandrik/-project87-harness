@@ -6,23 +6,28 @@
  * its own account and the outcomes cannot bleed into each other.
  *
  * Usage (from the project root, dev services up):
- *   npx ts-node test_newsletter/index.ts          full cycle: clean, seed, run, report
- *   npx ts-node test_newsletter/index.ts clean    remove previous test data only
- *   npx ts-node test_newsletter/index.ts report   re-check counters against expectations
+ *   npm run test:newsletter              full cycle: clean, seed, run, report
+ *   npm run test:newsletter -- clean     remove previous test data only
+ *   npm run test:newsletter -- report    re-check counters against expectations
+ *   npm run test:newsletter -- bulk      add planned templates spread over days
+ *
+ * `bulk` runs no pipeline and sends nothing: it only fills the outbox table with rows
+ * to look at, and it shifts the counters the `report` expectations pin down.
  */
-import serverStartup from '../serverStartup';
-import Account from '../models/account';
-import Email from '../models/email';
-import createRegularTransactions from '../serverTasks/createTransactions';
-import { UserModule } from '../models/module';
-import { knex, knex2 } from '../libs/mysqlDB';
-import { NEWSLETTER_STATUS } from '../libs/newsletterStatus';
-import { NEWSLETTER_RETRY_LIMIT } from '../libs/transactionConstants';
-import { buildNewsletterCountUrls } from '../libs/newsletterCounters';
-import { dateFormat } from '../libs/date';
-import su from '../serverTasks/serverUser.json';
+import serverStartup from '../../serverStartup';
+import Account from '../../models/account';
+import Email from '../../models/email';
+import createRegularTransactions from '../../serverTasks/createTransactions';
+import { UserModule } from '../../models/module';
+import { knex, knex2 } from '../../libs/mysqlDB';
+import { NEWSLETTER_RETRY_LIMIT, NEWSLETTER_STATUS } from '../../libs/newsletter';
+import { buildNewsletterCountUrls, NEWSLETTER_COUNTERS } from './counters';
+import { dateFormat } from '../../libs/date';
+import su from '../../serverTasks/serverUser.json';
 
 const MARK = '[NL-TEST]';
+
+const NO_SENDER_LOGIN = 'nl-test-nosender';
 
 /** techtype with neither an account file nor a system template, so buildPdf always fails */
 const TECHTYPE_MISSING_TEMPLATE = 99;
@@ -30,6 +35,19 @@ const TECHTYPE_MISSING_TEMPLATE = 99;
 const STAFF_VISIBLE = { status: 40, is_official_email: 1 };
 
 const today = () => dateFormat('yyyy-mm-dd') as string;
+
+const inDays = (days: number) => {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  return dateFormat(date, 'yyyy-mm-dd') as string;
+};
+
+const BULK_PLAN: Array<{ days: number, count: number }> = [
+  { days: 0, count: 12 },
+  { days: 2, count: 7 },
+  { days: 3, count: 8 },
+  { days: 4, count: 9 },
+];
 
 const say = (message: string) => process.stdout.write(`${message}\n`);
 
@@ -80,6 +98,28 @@ const waitForQuiet = async (accountIds: number[], timeoutMs = 300_000): Promise<
   throw new Error(`Newsletter run did not settle in ${timeoutMs}ms`);
 };
 
+/**
+ * Owns the 412 bucket. The mail service never hears about this user, so it can
+ * never grow a main mailbox and the bucket cannot silently turn into a 200.
+ */
+const ensureNoSenderUser = async (): Promise<number> => {
+  const [existing]: Array<{ id: number }> = await knex
+    .select('id')
+    .from('u_user')
+    .where('name', NO_SENDER_LOGIN);
+  if (existing) return Number(existing.id);
+
+  const [id] = await knex2('u_user').insert({
+    name: NO_SENDER_LOGIN,
+    sname: 'Тестов',
+    fname: 'Безъящика',
+    timestamp: dateFormat('mysql-timestamp') as string,
+    user_created: 0,
+  });
+  say(`user: создан ${NO_SENDER_LOGIN} (${id}) — владелец без основного ящика`);
+  return Number(id);
+};
+
 const resolveUsers = async (account: Account): Promise<{ sender: number, noSender: number, from: string }> => {
   const email = new Email(account.__user);
   const mailboxes = await email.loadMailboxList({ is_main: true, ignore_page: true });
@@ -87,21 +127,11 @@ const resolveUsers = async (account: Account): Promise<{ sender: number, noSende
     throw new Error('No main mailbox found in the mail service — bucket 200 is impossible');
   }
 
-  const withMailbox = new Set(mailboxes.map((mailbox) => Number(mailbox.user_id)));
-  const sender = Number(mailboxes[0].user_id);
-
-  const owners: Array<{ user_id: number }> = await knex
-    .distinct('user_id')
-    .from('a_account');
-  const noSender = owners
-    .map((row) => Number(row.user_id))
-    .find((id) => id > 0 && !withMailbox.has(id));
-
-  if (!noSender) {
-    throw new Error('Every account owner has a main mailbox — cannot build the 412 bucket');
-  }
-
-  return { sender, noSender, from: mailboxes[0].username };
+  return {
+    sender: Number(mailboxes[0].user_id),
+    noSender: await ensureNoSenderUser(),
+    from: mailboxes[0].username,
+  };
 };
 
 const clean = async (): Promise<number[]> => {
@@ -110,7 +140,10 @@ const clean = async (): Promise<number[]> => {
     .from('a_account')
     .where('name', 'like', `${MARK}%`);
   const ids = accounts.map((row) => Number(row.id));
-  if (!ids.length) return [];
+  if (!ids.length) {
+    await knex2('u_user').where('name', NO_SENDER_LOGIN).del();
+    return [];
+  }
 
   const transactions: Array<{ id: number }> = await knex
     .select('id')
@@ -126,6 +159,7 @@ const clean = async (): Promise<number[]> => {
   await knex2('a_parameter').whereIn('account_id', ids).del();
   await knex2('a_accessmap').where('element', 'account').whereIn('element_id', ids).del();
   await knex2('a_account').whereIn('id', ids).del();
+  await knex2('u_user').where('name', NO_SENDER_LOGIN).del();
 
   say(`clean: removed ${ids.length} accounts, ${transactionIds.length} transactions`);
   return ids;
@@ -207,29 +241,124 @@ const setTemplateState = async (
   });
 };
 
+const bulkAccount = async (account: Account): Promise<number> => {
+  const email = new Email(account.__user);
+  const [mailbox] = await email.loadMailboxList({ is_main: true, ignore_page: true });
+  if (!mailbox) {
+    throw new Error('Нет основного ящика — некому владеть тестовым аккаунтом');
+  }
+
+  const owner = Number(mailbox.user_id);
+  const [created] = await account.createAccount({
+    user_id: owner,
+    name: `${MARK} план`,
+    type: 'client',
+    status: 40,
+  });
+
+  await knex2('a_accessmap').insert({
+    uuid: knex.raw('UUID_TO_BIN(UUID())'),
+    element: 'account',
+    element_id: Number(created.id),
+    user_id: owner,
+    level: 0,
+    timestamp: dateFormat('mysql-timestamp') as string,
+    user_created: owner,
+  });
+
+  return Number(created.id);
+};
+
+const seedBulk = async (account: Account): Promise<void> => {
+  const existing: Array<{ id: number }> = await knex
+    .select('id')
+    .from('a_account')
+    .where('name', 'like', `${MARK}%`)
+    .orderBy('id');
+
+  const accountIds = existing.length
+    ? existing.map((row) => Number(row.id))
+    : [await bulkAccount(account)];
+
+  const specs = BULK_PLAN.flatMap(({ days, count }) => {
+    const date = inDays(days);
+    return Array.from({ length: count }, (unused, index) => ({
+      account_id: accountIds[index % accountIds.length],
+      is_template: 1,
+      t_has_newsletter: 1,
+      techtype: 1,
+      name: `${MARK} план ${date} #${index + 1}`.slice(0, 45),
+      type: 'sale',
+      is_debit: 0,
+      date,
+      r_status: 1,
+      r_start: date,
+      _records: [{
+        transaction_id: 0, name: 'Тестовая позиция', amount: 1, price: 1000,
+      }],
+    }));
+  });
+
+  await account.createTransaction(...specs);
+  BULK_PLAN.forEach(({ days, count }) => say(`bulk: ${count} шаблонов на ${inDays(days)}`));
+};
+
 const runPipeline = async (accountIds: number[], label: string): Promise<void> => {
   say(`run: ${label}`);
   await createRegularTransactions();
   await waitForQuiet(accountIds);
 };
 
-interface IExpectation {
-  key: string;
-  name: string;
-  expected: number;
-}
+/**
+ * ! The error counters are one short of the four failed rows on purpose: the
+ * transaction load check is `user_id = <reader>`, so the 412 account — owned by the
+ * user without a mailbox, or the bucket would not exist — never enters the reader's
+ * counters. Its row is asserted directly instead.
+ */
+const EXPECTED: Record<number, number> = {
+  101: 1,
+  102: 1,
+  103: 1,
+  104: 3,
+  105: 3,
+  106: 2,
+};
 
-const EXPECTED: IExpectation[] = [
-  { key: 'planned', name: 'Запланировано на дату', expected: 1 },
-  { key: 'sent', name: 'Отправлено за дату', expected: 1 },
-  { key: 'queued', name: 'В очереди', expected: 1 },
-  { key: 'failed', name: 'С ошибками за дату', expected: 4 },
-  { key: 'failedTotal', name: 'С ошибками за всё время', expected: 4 },
-  { key: 'abandoned', name: 'Повторов больше не будет', expected: 3 },
-];
+/**
+ * ! WARNING: counts have to be read as the owner of the test accounts. The server user
+ * is id 0, and the load check narrows every getter to `user_id = 0`, so it reports
+ * zeros no matter what is in the table. The lowest id is the sender's account, and
+ * only the sender is in the accessmap — reading as the 412 owner also returns zeros.
+ */
+const reportAs = async (): Promise<Account> => {
+  const [owner]: Array<{ user_id: number }> = await knex
+    .select('user_id')
+    .from('a_account')
+    .where('name', 'like', `${MARK}%`)
+    .orderBy('id')
+    .limit(1);
 
-const report = async (account: Account): Promise<boolean> => {
-  const counts = await account.loadCount(buildNewsletterCountUrls(today()), 'transaction');
+  return new Account({ ...(su as UserModule), id: Number(owner?.user_id ?? 0) });
+};
+
+const report = async (): Promise<boolean> => {
+  const account = await reportAs();
+  const accounts: Array<{ id: number }> = await knex
+    .select('id')
+    .from('a_account')
+    .where('name', 'like', `${MARK}%`);
+
+  /**
+   * ! Scoping to the test accounts is what makes the expectations absolute. Without
+   * it the counters also see live data — including the rows this very run creates
+   * from the production templates, since the nightly task takes every template there
+   * is — so no baseline taken before the run survives it.
+   */
+  const counts = await account.loadCount(
+    buildNewsletterCountUrls(today()),
+    'transaction',
+    { account_id: accounts.map((row) => Number(row.id)) },
+  );
 
   const rows: Array<{
     newsletter_status: number | null,
@@ -249,13 +378,19 @@ const report = async (account: Account): Promise<boolean> => {
     + ` попыток=${String(row.newsletter_retry_count ?? 0).padEnd(3)} ${row.name}`,
   ));
 
+  const hasNoSenderRow = rows.some(
+    (row) => Number(row.newsletter_status) === NEWSLETTER_STATUS.NO_SENDER,
+  );
+  let ok = hasNoSenderRow;
+  say(`\n  ${hasNoSenderRow ? 'OK  ' : 'FAIL'} строка 412 в аутбоксе`);
+
   say('\nСчётчики вкладки:');
-  let ok = true;
-  EXPECTED.forEach((item) => {
-    const actual = Number(counts[item.key] ?? 0);
-    const pass = actual === item.expected;
+  NEWSLETTER_COUNTERS.forEach((counter) => {
+    const expected = EXPECTED[counter.id];
+    const actual = Number(counts[counter.id] ?? 0);
+    const pass = actual === expected;
     if (!pass) ok = false;
-    say(`  ${pass ? 'OK  ' : 'FAIL'} ${item.name.padEnd(28)} ожидалось ${item.expected}, получено ${actual}`);
+    say(`  ${pass ? 'OK  ' : 'FAIL'} ${counter.name.padEnd(16)} ожидалось ${expected}, получено ${actual}`);
   });
 
   return ok;
@@ -313,15 +448,20 @@ const main = async (): Promise<void> => {
     return;
   }
 
+  if (command === 'bulk') {
+    await seedBulk(account);
+    return;
+  }
+
   if (command === 'report') {
-    const ok = await report(account);
+    const ok = await report();
     if (!ok) process.exitCode = 1;
     return;
   }
 
   await clean();
   await seed(account);
-  const ok = await report(account);
+  const ok = await report();
   if (!ok) process.exitCode = 1;
 };
 
@@ -330,7 +470,8 @@ main()
     say(`\nERROR: ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;
   })
-  .finally(() => {
-    knex.destroy();
-    knex2.destroy();
+  .finally(async () => {
+    await knex.destroy();
+    await knex2.destroy();
+    process.exit(process.exitCode ? 1 : 0);
   });

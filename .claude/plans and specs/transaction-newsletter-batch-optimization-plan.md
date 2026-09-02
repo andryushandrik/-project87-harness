@@ -42,18 +42,18 @@
 
 ## Задачи
 
-- [ ] В `executeTransactionTemplate` и `routes/sendTransactionNewsletter.ts:72`
+- [x] В `executeTransactionTemplate` и `routes/sendTransactionNewsletter.ts:72`
       переключить вызов на `sendTransactionNewsletterNew`.
-- [ ] Удалить старую `sendTransactionNewsletterBatch` (строки 582-631).
-- [ ] Переименовать `sendTransactionNewsletterNew` → `sendTransactionNewsletterBatch`
+- [x] Удалить старую `sendTransactionNewsletterBatch` (строки 582-631).
+- [x] Переименовать `sendTransactionNewsletterNew` → `sendTransactionNewsletterBatch`
       (включая `__name`/`__location` внутри метода и вызовы `.catch(...)` с
       `${__location}.sendTransactionNewsletterBatch` в `executeTransactionTemplate`).
-- [ ] tsc/lint по `models/account.ts`, `routes/sendTransactionNewsletter.ts` —
+- [x] tsc/lint по `models/account.ts`, `routes/sendTransactionNewsletter.ts` —
       убедиться, что убранный дубль не оставил неиспользуемых импортов/типов.
-- [ ] Юнит-тест на группировку `user_id:account_id` и на то, что
+- [x] Юнит-тест на группировку `user_id:account_id` и на то, что
       `mailboxList`/`staffList` грузятся один раз на батч, а не на группу
       (мок на `loadMailboxList`/`staff_getter`, счётчик вызовов).
-- [ ] Юнит-тест на частичный отказ: одна транзакция в группе не рендерится
+- [x] Юнит-тест на частичный отказ: одна транзакция в группе не рендерится
       (`buildTransactionPdf` throw) — письмо с остальными вложениями всё равно
       уходит, упавшая помечается `failed`, а не вся группа.
 

@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "../.."
+  },
+  "//": "ts-node compiles on demand and would otherwise miss the ambient types in ../../types, turning every getter type into `any`.",
+  "ts-node": {
+    "files": true
+  },
+  "include": [".", "../../types"]
+}
