@@ -10,6 +10,7 @@
  *   npm run test:newsletter -- clean     remove previous test data only
  *   npm run test:newsletter -- report    re-check counters against expectations
  *   npm run test:newsletter -- bulk      add planned templates spread over days
+ *   npm run test:newsletter -- v3        seed the manual mass-send screen, send nothing
  *
  * `bulk` runs no pipeline and sends nothing: it only fills the outbox table with rows
  * to look at, and it shifts the counters the `report` expectations pin down.
@@ -303,6 +304,73 @@ const seedBulk = async (account: Account): Promise<void> => {
   BULK_PLAN.forEach(({ days, count }) => say(`bulk: ${count} шаблонов на ${inDays(days)}`));
 };
 
+/**
+ * Data for the manual mass-send screen ("Рассылка и печать счетов"). Nothing is sent
+ * here: the accounts only set up the outcomes a tester triggers from the UI — one big
+ * enough to split into two batches of 30, one to mix two accounts in a selection, one
+ * whose staff is invisible to the recipient filter so every letter is skipped.
+ *
+ * ! There is deliberately no "owner without a mailbox" account here, unlike the
+ * automatic run above: the transaction getter narrows to `user_id = <reader>`, so an
+ * account owned by anyone else is invisible on the screen no matter what the accessmap
+ * says. That bucket is only reachable through the nightly pipeline.
+ */
+const V3_ACCOUNTS: Array<{ key: string, name: string, count: number }> = [
+  { key: 'v3bulk', name: `${MARK} v3 массовая (35)`, count: 35 },
+  { key: 'v3second', name: `${MARK} v3 второй аккаунт (5)`, count: 5 },
+  { key: 'v3NoRecipients', name: `${MARK} v3 без получателей (3)`, count: 3 },
+];
+
+const seedV3 = async (account: Account): Promise<void> => {
+  const users = await resolveUsers(account);
+  const recipient = process.env.NL_TEST_RECIPIENT || users.from;
+  say(`users: отправитель ${users.sender} (${users.from})`);
+
+  const created = await account.createAccount(...V3_ACCOUNTS.map((spec) => ({
+    user_id: users.sender,
+    name: spec.name,
+    type: 'client',
+    status: 40,
+    _staff: [{
+      account_id: 0,
+      sname: 'Тестов',
+      fname: 'Тест',
+      occupation: 'Получатель рассылки',
+      email: recipient,
+      ...(spec.key === 'v3NoRecipients' ? { status: 40, is_official_email: 0 } : STAFF_VISIBLE),
+    }],
+  })));
+
+  await knex2('a_accessmap').insert(created.map((row) => ({
+    uuid: knex.raw('UUID_TO_BIN(UUID())'),
+    element: 'account',
+    element_id: Number(row.id),
+    user_id: users.sender,
+    level: 0,
+    timestamp: dateFormat('mysql-timestamp') as string,
+    user_created: users.sender,
+  })));
+
+  const specs = V3_ACCOUNTS.flatMap((spec, index) => Array.from(
+    { length: spec.count },
+    (unused, number) => ({
+      account_id: Number(created[index].id),
+      techtype: 1,
+      name: `${MARK} ${spec.key} #${number + 1}`.slice(0, 45),
+      type: 'sale',
+      is_debit: 0,
+      date: today(),
+      _records: [{
+        transaction_id: 0, name: 'Тестовая позиция', amount: number + 1, price: 1000,
+      }],
+    }),
+  ));
+
+  await account.createTransaction(...specs);
+  V3_ACCOUNTS.forEach((spec) => say(`v3: ${spec.count} транзакций — ${spec.name}`));
+  say(`v3: получатель ${recipient}`);
+};
+
 const runPipeline = async (accountIds: number[], label: string): Promise<void> => {
   say(`run: ${label}`);
   await createRegularTransactions();
@@ -450,6 +518,12 @@ const main = async (): Promise<void> => {
 
   if (command === 'bulk') {
     await seedBulk(account);
+    return;
+  }
+
+  if (command === 'v3') {
+    await clean();
+    await seedV3(account);
     return;
   }
 
