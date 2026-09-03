@@ -95,5 +95,8 @@
       "Read(~/.aws/*)"
     ],
     "defaultMode": "default"
+  },
+  "worktree": {
+    "bgIsolation": "none"
   }
 }
