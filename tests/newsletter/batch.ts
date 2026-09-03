@@ -1,6 +1,6 @@
 /**
- * Self-check for the batch sender, no database and no mail service:
- * `npm run test:newsletter:batch`.
+ * Self-check for the batch sender, no database and no mail service. From the project root:
+ * `npx cross-env TS_NODE_PROJECT=tests/newsletter/tsconfig.json ts-node tests/newsletter/batch.ts`
  *
  * Covers the two properties the batch rewrite was made for and that nothing else
  * asserts — grouping by `user_id:account_id` with one mailbox/staff load per batch

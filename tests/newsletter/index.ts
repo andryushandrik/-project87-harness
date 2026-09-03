@@ -5,12 +5,16 @@
  * sender groups by `user_id:account_id` (models/account.ts:611), so each bucket gets
  * its own account and the outcomes cannot bleed into each other.
  *
- * Usage (from the project root, dev services up):
- *   npm run test:newsletter              full cycle: clean, seed, run, report
- *   npm run test:newsletter -- clean     remove previous test data only
- *   npm run test:newsletter -- report    re-check counters against expectations
- *   npm run test:newsletter -- bulk      add planned templates spread over days
- *   npm run test:newsletter -- v3        seed the manual mass-send screen, send nothing
+ * Usage (from the project root, dev services up). No npm script: package.json belongs
+ * to the main repository, this harness does not (docs/harness-split.md).
+ *
+ *   npx cross-env TS_NODE_PROJECT=tests/newsletter/tsconfig.json ts-node tests/newsletter/index.ts [command]
+ *
+ *   <no command>   full cycle: clean, seed, run, report
+ *   clean          remove previous test data only
+ *   report         re-check counters against expectations
+ *   bulk           add planned templates spread over days
+ *   v3             seed the manual mass-send screen, send nothing
  *
  * `bulk` runs no pipeline and sends nothing: it only fills the outbox table with rows
  * to look at, and it shifts the counters the `report` expectations pin down.
